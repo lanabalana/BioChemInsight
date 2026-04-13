@@ -67,6 +67,24 @@ RUN mamba install -c conda-forge numpy==1.23.5 -y
 # 安装 FastAPI 和 Web 服务依赖
 RUN pip install fastapi uvicorn -i https://pypi.tuna.tsinghua.edu.cn/simple
 
+# ---------------------------------------------------------------------------
+# Apply post-install patches to third-party packages (Issues 4 & 5):
+#   - paddlex processors.py: guard nms() calls against empty/1-D box arrays
+#   - decimer_segmentation: replace removed np.VisibleDeprecationWarning
+# The patch script is copied first so it can be run immediately.
+# ---------------------------------------------------------------------------
+COPY scripts/patch_packages.py /tmp/patch_packages.py
+RUN python /tmp/patch_packages.py && rm /tmp/patch_packages.py
+
+# ---------------------------------------------------------------------------
+# Issue 7: LD_LIBRARY_PATH – install conda activation hook so cuDNN libraries
+# in /opt/conda/lib are always on the dynamic linker path when the env is
+# loaded.  Also bake the path into the image-level ENV for Docker usage.
+# ---------------------------------------------------------------------------
+RUN mkdir -p /opt/conda/etc/conda/activate.d
+COPY scripts/activate_env.sh /opt/conda/etc/conda/activate.d/biocheminsight.sh
+RUN chmod +x /opt/conda/etc/conda/activate.d/biocheminsight.sh
+
 # 下载 DECIMER 模型权重
 RUN wget -O /opt/conda/lib/python3.10/site-packages/decimer_segmentation/mask_rcnn_molecule.h5 \
     "https://zenodo.org/record/10663579/files/mask_rcnn_molecule.h5?download=1"

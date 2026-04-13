@@ -34,7 +34,7 @@ def get_total_pages(pdf_file):
         return len(pdf_reader.pages)
 
 
-def extract_structures(pdf_file, structure_pages, output_dir, engine='molnextr', batch_size=4, progress_callback=None):
+def extract_structures(pdf_file, structure_pages, output_dir, engine='molnextr', batch_size=1, progress_callback=None):
     """
     从 PDF 文件中提取化学结构并保存为 CSV 文件。
     支持不连续页面的解析。
@@ -310,7 +310,7 @@ def main():
     parser.add_argument('--assay-pages', type=str, help='Pages for assays (e.g., "1-5" or "1,3,5" or "1-3,5,7-9")', default=None)
     parser.add_argument('--assay-names', type=str, help='Assay names to extract (comma-separated)', default='')
     parser.add_argument('--engine', type=str, help='Engine for structure extraction (molscribe, molnextr, molvec)', default='molnextr')
-    parser.add_argument('--batch-size', type=int, help='Batch size for parallel processing', default=4)
+    parser.add_argument('--batch-size', type=int, help='Batch size for parallel processing', default=1)
     parser.add_argument('--output', type=str, help='Output directory', default='output')
     parser.add_argument('--lang', type=str, help='Language for text extraction', default='en')
     
@@ -363,6 +363,22 @@ def main():
             engine=args.engine,
             batch_size=args.batch_size
         )
+
+    # Release GPU memory held by the structure-extraction frameworks (TensorFlow,
+    # PyTorch, PaddlePaddle) before starting the bioactivity extraction step so
+    # the OCR models can allocate memory without OOM errors.
+    try:
+        import gc
+        import torch
+        torch.cuda.empty_cache()
+        gc.collect()
+    except Exception:
+        pass
+    try:
+        import tensorflow as tf
+        tf.keras.backend.clear_session()
+    except Exception:
+        pass
 
     assay_data_dicts = {}
 

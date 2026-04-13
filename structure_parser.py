@@ -4,10 +4,8 @@ import numpy as np
 from tqdm import tqdm
 import cv2
 from PIL import Image
-import signal
 import subprocess
 import threading
-import time
 
 import torch
 from decimer_segmentation import get_expanded_masks, apply_masks
@@ -28,7 +26,6 @@ predict_lock = threading.Lock()
 # 超时设置（秒）
 MODEL_TIMEOUT = 300  # 5分钟
 MOLECULE_PROCESSING_TIMEOUT = 60  # 1分钟
-PAGE_PROCESSING_TIMEOUT = 600  # 10分钟
 
 
 def extract_molblock(prediction):
@@ -200,37 +197,14 @@ def process_segment(engine, model, MOLVEC, segment, idx, i, segmented_dir, outpu
                             smiles = result or ''
                         
                 elif engine == 'molnextr':
-                    # 使用超时控制的线程来运行模型预测
-                    def predict_molnextr():
-                        return model.predict_final_results(segment_name, return_atoms_bonds=True, return_confidence=True)
-                    
-                    # 创建一个线程来运行预测
-                    import threading
-                    result_container = [None]
-                    exception_container = [None]
-                    
-                    def run_predict():
-                        try:
-                            result_container[0] = predict_molnextr()
-                        except Exception as e:
-                            exception_container[0] = e
-                    
-                    predict_thread = threading.Thread(target=run_predict)
-                    predict_thread.start()
-                    predict_thread.join(timeout=MODEL_TIMEOUT)
-                    
-                    if predict_thread.is_alive():
-                        print(f"Timeout processing segment {idx} on page {i} with molnextr")
-                        smiles = ''
-                    elif exception_container[0]:
-                        raise exception_container[0]
+                    # Call directly in the current thread so PyTorch/CUDA context
+                    # is inherited correctly and results are never silently dropped.
+                    result = model.predict_final_results(segment_name, return_atoms_bonds=True, return_confidence=True) or {}
+                    if isinstance(result, dict):
+                        smiles = result.get('predicted_smiles') or ''
+                        molblock = extract_molblock(result)
                     else:
-                        result = result_container[0] or {}
-                        if isinstance(result, dict):
-                            smiles = result.get('predicted_smiles') or ''
-                            molblock = extract_molblock(result)
-                        else:
-                            smiles = result or ''
+                        smiles = result or ''
                 elif engine == 'molvec':
                     from rdkit import Chem
                     cmd = f'java -jar {MOLVEC} -f {segment_name} -o {segment_name}.sdf'
@@ -267,77 +241,59 @@ def process_segment(engine, model, MOLVEC, segment, idx, i, segmented_dir, outpu
 
 def process_page(engine, model, MOLVEC, i, scanned_page_file_path, segmented_dir, images_dir, progress_callback=None, total_pages=None, page_idx=None):
     """处理单个页面"""
-    # 创建一个线程来运行页面处理
-    result_container = [None]
-    exception_container = [None]
-    
-    def run_process_page():
-        try:
-            if progress_callback and page_idx is not None and total_pages is not None:
-                progress_callback(page_idx + 1, total_pages, f"Processing page {i}")
+    # Run directly in the caller's thread (the ThreadPoolExecutor worker) so that
+    # TensorFlow/cuDNN can find the GPU context that was initialised in the main
+    # thread before the executor was created.  An extra threading.Thread wrapper
+    # here would create a third thread level that breaks cuDNN initialisation.
+    try:
+        if progress_callback and page_idx is not None and total_pages is not None:
+            progress_callback(page_idx + 1, total_pages, f"Processing page {i}")
 
-            page = cv2.imread(scanned_page_file_path)
-            if page is None:
-                print(f"Warning: Could not read image for page {i}")
-                result_container[0] = ([], [], [])
-                return
+        page = cv2.imread(scanned_page_file_path)
+        if page is None:
+            print(f"Warning: Could not read image for page {i}")
+            return [], [], []
 
-            masks = get_expanded_masks(page)
-            segments, bboxes = apply_masks(page, masks)
-            if len(segments) > 0:
-                segments, bboxes, masks = sort_segments_bboxes(segments, bboxes, masks)
+        masks = get_expanded_masks(page)
+        segments, bboxes = apply_masks(page, masks)
+        if len(segments) > 0:
+            segments, bboxes, masks = sort_segments_bboxes(segments, bboxes, masks)
 
-            page_data_list = []
-            image_files = []
-            segment_info = []
+        page_data_list = []
+        image_files = []
+        segment_info = []
 
-            for idx, segment in enumerate(segments):
-                output_name = os.path.join(segmented_dir, f'highlight_{i}_{idx}.png')
-                box_coords_path = os.path.join(segmented_dir, f'highlight_{i}_{idx}.json')
-                try:
-                    save_box_image(bboxes, masks, idx, page, output_name)
+        for idx, segment in enumerate(segments):
+            output_name = os.path.join(segmented_dir, f'highlight_{i}_{idx}.png')
+            box_coords_path = os.path.join(segmented_dir, f'highlight_{i}_{idx}.json')
+            try:
+                save_box_image(bboxes, masks, idx, page, output_name)
 
-                    # Save the bounding box coordinates to a JSON file using built-in ints
-                    with open(box_coords_path, 'w') as f_json:
-                        import json
-                        bbox_coords = np.asarray(bboxes[idx]).astype(int).tolist()
-                        json.dump({"box": bbox_coords}, f_json)
+                # Save the bounding box coordinates to a JSON file using built-in ints
+                with open(box_coords_path, 'w') as f_json:
+                    import json
+                    bbox_coords = np.asarray(bboxes[idx]).astype(int).tolist()
+                    json.dump({"box": bbox_coords}, f_json)
 
-                except Exception as e:
-                    print(f"Warning: Failed to save boxed image or coords for segment {idx} on page {i}: {e}")
+            except Exception as e:
+                print(f"Warning: Failed to save boxed image or coords for segment {idx} on page {i}: {e}")
 
-                prev_page_path = os.path.join(images_dir, f'page_{i-1}.png')
-                row_data = process_segment(engine, model, MOLVEC, segment, idx, i, segmented_dir, output_name, prev_page_path)
-                if row_data:
-                    row_data['BOX_COORDS_FILE'] = box_coords_path
-                    row_data['PAGE_IMAGE_FILE'] = scanned_page_file_path
-                    page_data_list.append(row_data)
-                    image_files.append(output_name)
-                    segment_info.append((len(page_data_list) - 1, i, idx))
+            prev_page_path = os.path.join(images_dir, f'page_{i-1}.png')
+            row_data = process_segment(engine, model, MOLVEC, segment, idx, i, segmented_dir, output_name, prev_page_path)
+            if row_data:
+                row_data['BOX_COORDS_FILE'] = box_coords_path
+                row_data['PAGE_IMAGE_FILE'] = scanned_page_file_path
+                page_data_list.append(row_data)
+                image_files.append(output_name)
+                segment_info.append((len(page_data_list) - 1, i, idx))
 
-            result_container[0] = (page_data_list, image_files, segment_info)
-        except Exception as e:
-            print(f"Error processing page {i}: {e}")
-            exception_container[0] = e
-            result_container[0] = ([], [], [])
-    
-    # 在单独的线程中运行页面处理
-    process_thread = threading.Thread(target=run_process_page)
-    process_thread.start()
-    process_thread.join(timeout=PAGE_PROCESSING_TIMEOUT)
-    
-    # 检查线程是否超时
-    if process_thread.is_alive():
-        print(f"Timeout processing page {i}, terminating...")
-        # 注意：这里无法真正终止线程，但至少可以返回默认值
+        return page_data_list, image_files, segment_info
+    except Exception as e:
+        print(f"Error processing page {i}: {e}")
         return [], [], []
-    elif exception_container[0]:
-        raise exception_container[0]
-    else:
-        return result_container[0]
 
 
-def extract_structures_from_pdf(pdf_file, page_start, page_end, output, engine='molnextr', progress_callback=None, batch_size=4):
+def extract_structures_from_pdf(pdf_file, page_start, page_end, output, engine='molnextr', progress_callback=None, batch_size=1):
     images_dir = os.path.join(output, 'structure_images')
     segmented_dir = os.path.join(output, 'segment')
 
@@ -381,6 +337,12 @@ def extract_structures_from_pdf(pdf_file, page_start, page_end, output, engine='
         model = molnextr(ckpt_path, device)
     else:
         raise ValueError(f'Invalid engine: {engine}')
+
+    # GPU warmup: run one dummy segmentation call in the main thread so that
+    # TensorFlow initialises its cuDNN/GPU context here rather than inside a
+    # worker thread where it may not find the CUDA libraries.
+    print("Warming up GPU context for DECIMER segmentation...")
+    get_expanded_masks(np.zeros((64, 64, 3), dtype='uint8'))
 
     data_list = []
     all_image_files = []

@@ -69,10 +69,17 @@ conda activate chem_ocr
 First, install PyTorch with CUDA support.
 
 ```bash
-# Install CUDA Tools and PyTorch
+# Install CUDA Tools and PyTorch (CUDA 11.8 – RTX 30xx / A100 and older)
 mamba install -c nvidia -c conda-forge cudatoolkit=11.8
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118 -i https://pypi.tuna.tsinghua.edu.cn/simple
 ```
+
+> **Newer GPUs (compute capability 12.0+, e.g. RTX 5090 / Blackwell)**
+> The stable CUDA 11.8 wheel does not support these GPUs.  Install a nightly
+> build that targets CUDA 12.8 instead:
+> ```bash
+> pip install torch --pre --index-url https://download.pytorch.org/whl/nightly/cu128
+> ```
 
 Next, install the remaining Python packages.
 
@@ -93,6 +100,30 @@ sudo apt-get install -y nodejs
 # On macOS (using homebrew):
 # brew install node
 ```
+
+#### Step 5: Apply post-install patches and set up LD_LIBRARY_PATH
+
+Some third-party packages contain bugs that are fixed by a small patch script
+included in this repository.  Run it once after installation:
+
+```bash
+python scripts/patch_packages.py
+```
+
+Then install the conda activation hook so that cuDNN libraries bundled inside
+the conda environment are always found at runtime:
+
+```bash
+# Installs the hook into the active conda environment
+CONDA_PREFIX=$(python -c "import sys; print(sys.prefix)")
+mkdir -p "$CONDA_PREFIX/etc/conda/activate.d"
+cp scripts/activate_env.sh "$CONDA_PREFIX/etc/conda/activate.d/biocheminsight.sh"
+chmod +x "$CONDA_PREFIX/etc/conda/activate.d/biocheminsight.sh"
+```
+
+After this, every `conda activate chem_ocr` will automatically set
+`LD_LIBRARY_PATH` to include `$CONDA_PREFIX/lib`, which is required for
+TensorFlow to locate cuDNN.
 
 ## Usage 📖
 

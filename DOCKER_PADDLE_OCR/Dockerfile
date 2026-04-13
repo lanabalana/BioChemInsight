@@ -41,6 +41,35 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /workspace
 
+# ---------------------------------------------------------------------------
+# Patch paddlex processors.py: guard nms() calls against empty / 1-D box
+# arrays that cause IndexError when no boxes are detected (Issue 4).
+# ---------------------------------------------------------------------------
+RUN python - <<'EOF'
+import pathlib, re, sys
+try:
+    import paddlex
+    pkg_dir = pathlib.Path(paddlex.__file__).parent
+except ImportError:
+    print("paddlex not installed, skipping nms patch"); sys.exit(0)
+
+NMS_PATTERN = re.compile(
+    r"^(\s*\w+\s*=\s*)(nms\([^)]+\))(\s*)$",
+    re.MULTILINE,
+)
+for p in pkg_dir.rglob("processors.py"):
+    text = p.read_text()
+    new_text = NMS_PATTERN.sub(
+        r"\1(\2 if boxes.ndim > 1 and boxes.shape[0] > 0 else [])\3",
+        text,
+    )
+    if new_text != text:
+        p.write_text(new_text)
+        print(f"PATCHED {p}")
+    else:
+        print(f"OK (no changes needed) {p}")
+EOF
+
 COPY app /workspace/app
 
 EXPOSE 8010
