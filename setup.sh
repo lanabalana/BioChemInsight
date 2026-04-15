@@ -90,18 +90,42 @@ pip install torch==2.7.1 torchvision torchaudio \
 ok "PyTorch installed: $(python -c 'import torch; print(torch.__version__)')"
 
 # ==============================================================================
-# 4. Install TensorFlow via conda
+# 4. Clone ChemSAM and install its Python dependencies
 # ==============================================================================
-step "Installing TensorFlow 2.15 + NumPy 1.24 via conda-forge"
-conda install -c conda-forge tensorflow=2.15 numpy=1.24 -y
-ok "TensorFlow installed: $(python -c 'import tensorflow as tf; print(tf.__version__)')"
+step "Cloning ChemSAM (chemical structure segmentation model)"
+CHEMSAM_DIR="$REPO_DIR/vendor/ChemSAM"
+mkdir -p "$REPO_DIR/vendor"
+if [ -d "$CHEMSAM_DIR/.git" ]; then
+    warn "ChemSAM already cloned at $CHEMSAM_DIR — skipping."
+else
+    git clone https://github.com/mindrank-ai/ChemSAM.git "$CHEMSAM_DIR"
+    ok "ChemSAM cloned to $CHEMSAM_DIR"
+fi
+
+step "Installing ChemSAM Python dependencies"
+pip install scipy scikit-image imageio
+ok "ChemSAM dependencies installed."
+
+step "ChemSAM model checkpoint"
+CKPT_DIR="$CHEMSAM_DIR/logs/chemseg_pix_sdg_2023_07_10_17_34_25/Model"
+CKPT_FILE="$CKPT_DIR/last_660_checkpoint.pth"
+mkdir -p "$CKPT_DIR"
+if [ -f "$CKPT_FILE" ]; then
+    ok "ChemSAM checkpoint already present."
+else
+    warn "ChemSAM checkpoint NOT found."
+    warn "Contact the ChemSAM authors (mindrank-ai) to obtain last_660_checkpoint.pth"
+    warn "and place it at:"
+    warn "  $CKPT_FILE"
+    warn "Setup will continue; the server will fail at startup until the checkpoint is present."
+fi
 
 # ==============================================================================
-# 5. Install decimer-segmentation and molscribe
+# 5. Install molscribe (SMILES recognition engine)
 # ==============================================================================
-step "Installing decimer-segmentation and molscribe"
-pip install decimer-segmentation molscribe
-ok "decimer-segmentation and molscribe installed."
+step "Installing molscribe"
+pip install molscribe
+ok "molscribe installed."
 
 # ==============================================================================
 # 6. Re-install correct PyTorch (molscribe may downgrade it)

@@ -8,7 +8,7 @@ import subprocess
 import threading
 
 import torch
-from decimer_segmentation import get_expanded_masks, apply_masks
+from utils.chemsam_segmentation import get_chemsam_segments, warmup as chemsam_warmup
 
 from constants import MOLVEC
 from utils.image_utils import save_box_image
@@ -242,9 +242,9 @@ def process_segment(engine, model, MOLVEC, segment, idx, i, segmented_dir, outpu
 def process_page(engine, model, MOLVEC, i, scanned_page_file_path, segmented_dir, images_dir, progress_callback=None, total_pages=None, page_idx=None):
     """处理单个页面"""
     # Run directly in the caller's thread (the ThreadPoolExecutor worker) so that
-    # TensorFlow/cuDNN can find the GPU context that was initialised in the main
+    # PyTorch/CUDA can find the GPU context that was initialised in the main
     # thread before the executor was created.  An extra threading.Thread wrapper
-    # here would create a third thread level that breaks cuDNN initialisation.
+    # here would create a third thread level that breaks CUDA initialisation.
     try:
         if progress_callback and page_idx is not None and total_pages is not None:
             progress_callback(page_idx + 1, total_pages, f"Processing page {i}")
@@ -254,8 +254,7 @@ def process_page(engine, model, MOLVEC, i, scanned_page_file_path, segmented_dir
             print(f"Warning: Could not read image for page {i}")
             return [], [], []
 
-        masks = get_expanded_masks(page)
-        segments, bboxes = apply_masks(page, masks)
+        segments, bboxes, masks = get_chemsam_segments(page)
         if len(segments) > 0:
             segments, bboxes, masks = sort_segments_bboxes(segments, bboxes, masks)
 
@@ -338,11 +337,11 @@ def extract_structures_from_pdf(pdf_file, page_start, page_end, output, engine='
     else:
         raise ValueError(f'Invalid engine: {engine}')
 
-    # GPU warmup: run one dummy segmentation call in the main thread so that
-    # TensorFlow initialises its cuDNN/GPU context here rather than inside a
-    # worker thread where it may not find the CUDA libraries.
-    print("Warming up GPU context for DECIMER segmentation...")
-    get_expanded_masks(np.zeros((64, 64, 3), dtype='uint8'))
+    # GPU warmup: load ChemSAM and run a dummy inference in the main thread so
+    # that PyTorch/CUDA context is established before ThreadPoolExecutor workers
+    # launch (worker threads cannot reliably initialise CUDA themselves).
+    print("Warming up GPU context for ChemSAM segmentation...")
+    chemsam_warmup()
 
     data_list = []
     all_image_files = []
